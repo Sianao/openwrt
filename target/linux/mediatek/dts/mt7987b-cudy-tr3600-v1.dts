@@ -14,9 +14,9 @@
 	aliases {
 		label-mac-device = &gmac1;
 		led-boot = &led_status_red;
-		led-failsafe = &led_status_blue;
-		led-running = &led_status_blue;
-		led-upgrade = &led_status_blue;
+		led-failsafe = &led_status_white;
+		led-running = &led_status_white;
+		led-upgrade = &led_status_white;
 		serial0 = &uart0;
 	};
 
@@ -33,8 +33,8 @@
 	gpio-leds {
 		compatible = "gpio-leds";
 
-		led_status_blue: led-0 {
-			color = <LED_COLOR_ID_BLUE>;
+		led_status_white: led-0 {
+			color = <LED_COLOR_ID_WHITE>;
 			function = LED_FUNCTION_STATUS;
 			gpios = <&pio 48 GPIO_ACTIVE_LOW>;
 		};
@@ -140,9 +140,10 @@
 			nvmem-cells = <&eeprom_factory_0>;
 			nvmem-cell-names = "eeprom";
 
+			/* Matches stock: 2.4 GHz shares the LAN address (bdinfo +0). */
 			band@0 {
 				reg = <0>;
-				nvmem-cells = <&macaddr_bdinfo_de00 3>;
+				nvmem-cells = <&macaddr_bdinfo_de00 0>;
 				nvmem-cell-names = "mac-address";
 			};
 
