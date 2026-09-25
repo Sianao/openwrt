@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+[ "$(board_name)" = "cudy,tr3600-v1" ] || exit 0
+
+# Ensure the rollback/confirm service is enabled. The service body itself
+# no-ops on every other board, this just makes the intent explicit.
+/etc/init.d/tr3600-boot-guard enable
+
+exit 0

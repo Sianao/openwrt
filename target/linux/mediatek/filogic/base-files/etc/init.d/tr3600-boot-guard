@@ -1,0 +1,121 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+START=10
+STOP=90
+
+EXTRA_COMMANDS="confirm"
+EXTRA_HELP="        confirm  Confirm a pending slot after it has proven stable"
+
+TR3600_BOOT_GUARD_WAIT="${TR3600_BOOT_GUARD_WAIT:-120}"
+
+tr3600_boot_guard_enabled() {
+	[ "$(board_name)" = "cudy,tr3600-v1" ]
+}
+
+tr3600_boot_guard_schedule_confirm() {
+	[ -e /tmp/.tr3600-boot-guard-confirm ] && return 0
+	touch /tmp/.tr3600-boot-guard-confirm
+	(
+		sleep "$TR3600_BOOT_GUARD_WAIT"
+		/etc/init.d/tr3600-boot-guard confirm
+	) &
+}
+
+# Point the bootloader back at the rollback slot for the next boot while we
+# continue running the freshly written pending slot. This must happen before
+# network comes up so a late crash still boots the old slot.
+tr3600_boot_guard_arm() {
+	local boot_slot pending rollback
+
+	boot_slot="$(cmdline_get_var boot_param.boot_image_slot)"
+	pending="$(fw_printenv -n openwrt_pending_slot 2>/dev/null)"
+	rollback="$(fw_printenv -n openwrt_rollback_slot 2>/dev/null)"
+
+	# Nothing to guard unless this boot is a freshly written pending slot.
+	[ -n "$pending" ] || return 0
+	[ "$boot_slot" = "$pending" ] || return 0
+	[ -n "$rollback" ] || {
+		logger -t tr3600-boot-guard "pending slot $pending without rollback slot"
+		return 0
+	}
+
+	if ! fw_setenv "dual_boot.current_slot" "$rollback"; then
+		logger -t tr3600-boot-guard "failed to arm rollback to slot $rollback"
+		return 1
+	fi
+
+	logger -t tr3600-boot-guard "armed rollback: running slot $pending, next boot slot $rollback"
+	sync
+}
+
+tr3600_boot_guard_healthy() {
+	local boot_slot pending
+
+	boot_slot="$(cmdline_get_var boot_param.boot_image_slot)"
+	pending="$(fw_printenv -n openwrt_pending_slot 2>/dev/null)"
+
+	[ -n "$boot_slot" ] && [ "$boot_slot" = "$pending" ] || return 1
+
+	# Overlay mounted and writable.
+	grep -qs ' /overlay ' /proc/mounts || return 1
+	[ -w /overlay ] || return 1
+
+	# Core services are alive.
+	pidof procd >/dev/null 2>&1 || return 1
+	pidof netifd >/dev/null 2>&1 || return 1
+	[ -S /var/run/ubus/ubus.sock ] || return 1
+
+	# Environment remains readable.
+	fw_printenv dual_boot.current_slot >/dev/null 2>&1 || return 1
+
+	# Not in failsafe mode.
+	[ -e /tmp/.failsafe ] && return 1
+
+	return 0
+}
+
+tr3600_boot_guard_confirm() {
+	local boot_slot pending
+
+	boot_slot="$(cmdline_get_var boot_param.boot_image_slot)"
+	pending="$(fw_printenv -n openwrt_pending_slot 2>/dev/null)"
+
+	[ -n "$pending" ] || return 0
+	[ "$boot_slot" = "$pending" ] || return 0
+
+	if ! tr3600_boot_guard_healthy; then
+		logger -t tr3600-boot-guard "stability check failed, rollback stays armed"
+		return 1
+	fi
+
+	if ! fw_setenv -s - <<-EOF
+		dual_boot.current_slot ${pending}
+		dual_boot.slot_${pending}_invalid 0
+		openwrt_pending_slot
+		openwrt_rollback_slot
+	EOF
+	then
+		logger -t tr3600-boot-guard "failed to confirm slot $pending"
+		return 1
+	fi
+
+	logger -t tr3600-boot-guard "confirmed slot $pending"
+	sync
+}
+
+boot() {
+	tr3600_boot_guard_enabled || return 0
+	tr3600_boot_guard_arm
+	tr3600_boot_guard_schedule_confirm
+}
+
+start() {
+	tr3600_boot_guard_enabled || return 0
+	tr3600_boot_guard_schedule_confirm
+}
+
+confirm() {
+	tr3600_boot_guard_enabled || return 0
+	tr3600_boot_guard_confirm
+}

@@ -161,6 +161,21 @@ tr3600_dual_boot_upgrade_failed() {
 	exit 1
 }
 
+tr3600_verify_volume() {
+	local vol="$1"
+	local size
+
+	[ -n "$vol" ] || return 1
+	[ -e "/dev/$vol" ] || return 1
+
+	if [ -r "/sys/class/ubi/$vol/data_bytes" ]; then
+		size="$(cat "/sys/class/ubi/$vol/data_bytes" 2>/dev/null)"
+		[ "$size" -gt 0 ] 2>/dev/null || return 1
+	fi
+
+	return 0
+}
+
 tr3600_dual_boot_upgrade() {
 	local image="$1"
 	local boot_slot
@@ -169,8 +184,12 @@ tr3600_dual_boot_upgrade() {
 	local kernel_part
 	local rootfs_part
 	local env_part
+	local ubidev
+	local kern_vol
+	local root_vol
 
-	grep -qw 'boot_param.dual_boot' /proc/cmdline ||
+	# The bootloader must advertise the dual-boot slot/volume layout.
+	grep -qwF 'boot_param.dual_boot' /proc/cmdline ||
 		tr3600_dual_boot_upgrade_failed "dual-boot command-line flag is missing"
 
 	boot_slot="$(cmdline_get_var boot_param.boot_image_slot)"
@@ -179,6 +198,7 @@ tr3600_dual_boot_upgrade() {
 	rootfs_part="$(cmdline_get_var boot_param.upgrade_rootfs_part)"
 	env_part="$(cmdline_get_var boot_param.env_part)"
 
+	# Map the inactive slot to its kernel/rootfs volume names.
 	CI_UBIPART="ubi"
 	case "$upgrade_slot" in
 	0)
@@ -194,6 +214,7 @@ tr3600_dual_boot_upgrade() {
 		;;
 	esac
 
+	# The volume names supplied by the bootloader must match the slot mapping.
 	[ "$kernel_part" = "$CI_KERNPART" ] ||
 		tr3600_dual_boot_upgrade_failed "kernel volume mismatch: $kernel_part"
 	[ "$rootfs_part" = "$CI_ROOTPART" ] ||
@@ -201,6 +222,8 @@ tr3600_dual_boot_upgrade() {
 	[ "$env_part" = "u-boot-env" ] ||
 		tr3600_dual_boot_upgrade_failed "environment volume mismatch: $env_part"
 
+	# The running slot and the environment's current slot must agree, and the
+	# upgrade target must be the other slot.
 	env_slot="$(fw_printenv -n dual_boot.current_slot 2>/dev/null)" ||
 		tr3600_dual_boot_upgrade_failed "cannot read U-Boot environment"
 
@@ -213,25 +236,45 @@ tr3600_dual_boot_upgrade() {
 		;;
 	esac
 
+	# The rootfs_data volume is shared by both slots and must survive the
+	# upgrade so configuration and the overlay stay intact.
+	CI_PRESERVE_ROOTFS_DATA=1
+
 	# Prevent the bootloader from selecting a partially written slot after a
-	# power loss. The active slot is not changed until all writes have finished.
+	# power loss. The active slot is not changed until all writes have
+	# finished and every environment variable can be committed atomically.
 	fw_setenv "dual_boot.slot_${upgrade_slot}_invalid" 1 ||
 		tr3600_dual_boot_upgrade_failed "cannot mark slot $upgrade_slot invalid"
 	sync
 
+	# Write only the inactive slot. nand_do_flash_file verifies the image
+	# before it performs any destructive action.
 	nand_do_flash_file "$image" ||
 		tr3600_dual_boot_upgrade_failed "failed writing slot $upgrade_slot"
 
-	# rootfs_data is shared by both slots and is recreated by nand_do_flash_file.
+	# Make sure both volumes exist and carry data before activating the slot.
+	ubidev="$(nand_find_ubi "$CI_UBIPART")"
+	[ -n "$ubidev" ] ||
+		tr3600_dual_boot_upgrade_failed "cannot find UBI device $CI_UBIPART"
+	kern_vol="$(nand_find_volume "$ubidev" "$CI_KERNPART")"
+	root_vol="$(nand_find_volume "$ubidev" "$CI_ROOTPART")"
+	tr3600_verify_volume "$kern_vol" ||
+		tr3600_dual_boot_upgrade_failed "missing or empty kernel volume $CI_KERNPART"
+	tr3600_verify_volume "$root_vol" ||
+		tr3600_dual_boot_upgrade_failed "missing or empty rootfs volume $CI_ROOTPART"
+
+	# Restore the saved configuration into the shared rootfs_data volume.
 	nand_do_restore_config ||
 		tr3600_dual_boot_upgrade_failed "failed restoring configuration"
 	sync
 
-	# Commit both variables in a single environment update. If this fails, the
-	# old slot remains active and the newly written slot remains invalid.
+	# Commit the whole state transition in one environment update. If this
+	# fails, the old slot remains active and the target slot stays invalid.
 	if ! fw_setenv -s - <<-EOF
 		dual_boot.slot_${upgrade_slot}_invalid 0
 		dual_boot.current_slot ${upgrade_slot}
+		openwrt_pending_slot ${upgrade_slot}
+		openwrt_rollback_slot ${env_slot}
 	EOF
 	then
 		tr3600_dual_boot_upgrade_failed "failed activating slot $upgrade_slot"

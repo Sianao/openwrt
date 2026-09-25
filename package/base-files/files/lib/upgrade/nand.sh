@@ -188,6 +188,7 @@ nand_upgrade_prepare_ubi() {
 
 	local kernel_length="$3"
 	local has_env="${4:-0}"
+	local preserve_rootfs_data="${CI_PRESERVE_ROOTFS_DATA:-0}"
 	local kern_ubidev
 	local root_ubidev
 	local data_ubidev
@@ -210,12 +211,16 @@ nand_upgrade_prepare_ubi() {
 	# remove ubiblocks
 	[ "$kern_ubivol" ] && { nand_remove_ubiblock $kern_ubivol || return 1; }
 	[ "$root_ubivol" ] && { nand_remove_ubiblock $root_ubivol || return 1; }
-	[ "$data_ubivol" ] && { nand_remove_ubiblock $data_ubivol || return 1; }
+	if [ "$preserve_rootfs_data" -eq 0 ]; then
+		[ "$data_ubivol" ] && { nand_remove_ubiblock $data_ubivol || return 1; }
+	fi
 
 	# kill volumes
 	[ "$kern_ubivol" ] && ubirmvol /dev/$kern_ubidev -N "$CI_KERNPART" || :
 	[ "$root_ubivol" ] && ubirmvol /dev/$root_ubidev -N "$CI_ROOTPART" || :
-	[ "$data_ubivol" ] && ubirmvol /dev/$data_ubidev -N rootfs_data || :
+	if [ "$preserve_rootfs_data" -eq 0 ]; then
+		[ "$data_ubivol" ] && ubirmvol /dev/$data_ubidev -N rootfs_data || :
+	fi
 
 	# create provisioning vol
 	if [ "${UPGRADE_OPT_ADD_PROVISIONING:-0}" -gt 0 ]; then
@@ -250,7 +255,7 @@ nand_upgrade_prepare_ubi() {
 	fi
 
 	# create rootfs_data vol for non-ubifs rootfs
-	if [ "$rootfs_type" != "ubifs" ]; then
+	if [ "$preserve_rootfs_data" -eq 0 ] && [ "$rootfs_type" != "ubifs" ]; then
 		local rootfs_data_size_param="-m"
 		if [ -n "$rootfs_data_max" ]; then
 			rootfs_data_size_param="-s $rootfs_data_max"
