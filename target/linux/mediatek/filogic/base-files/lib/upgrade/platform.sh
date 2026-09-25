@@ -155,6 +155,94 @@ mtk_dual_boot_flash_both_slots() {
 	nand_do_flash_file "$1" || nand_do_upgrade_failed
 }
 
+tr3600_dual_boot_upgrade_failed() {
+	echo "TR3600 dual-slot upgrade failed: $*" >&2
+	nand_do_upgrade_failed
+	exit 1
+}
+
+tr3600_dual_boot_upgrade() {
+	local image="$1"
+	local boot_slot
+	local upgrade_slot
+	local env_slot
+	local kernel_part
+	local rootfs_part
+	local env_part
+
+	grep -qw 'boot_param.dual_boot' /proc/cmdline ||
+		tr3600_dual_boot_upgrade_failed "dual-boot command-line flag is missing"
+
+	boot_slot="$(cmdline_get_var boot_param.boot_image_slot)"
+	upgrade_slot="$(cmdline_get_var boot_param.upgrade_image_slot)"
+	kernel_part="$(cmdline_get_var boot_param.upgrade_kernel_part)"
+	rootfs_part="$(cmdline_get_var boot_param.upgrade_rootfs_part)"
+	env_part="$(cmdline_get_var boot_param.env_part)"
+
+	CI_UBIPART="ubi"
+	case "$upgrade_slot" in
+	0)
+		CI_KERNPART="kernel"
+		CI_ROOTPART="rootfs"
+		;;
+	1)
+		CI_KERNPART="kernel2"
+		CI_ROOTPART="rootfs2"
+		;;
+	*)
+		tr3600_dual_boot_upgrade_failed "invalid upgrade slot: $upgrade_slot"
+		;;
+	esac
+
+	[ "$kernel_part" = "$CI_KERNPART" ] ||
+		tr3600_dual_boot_upgrade_failed "kernel volume mismatch: $kernel_part"
+	[ "$rootfs_part" = "$CI_ROOTPART" ] ||
+		tr3600_dual_boot_upgrade_failed "rootfs volume mismatch: $rootfs_part"
+	[ "$env_part" = "u-boot-env" ] ||
+		tr3600_dual_boot_upgrade_failed "environment volume mismatch: $env_part"
+
+	env_slot="$(fw_printenv -n dual_boot.current_slot 2>/dev/null)" ||
+		tr3600_dual_boot_upgrade_failed "cannot read U-Boot environment"
+
+	case "$env_slot:$boot_slot:$upgrade_slot" in
+	0:0:1|1:1:0)
+		;;
+	*)
+		tr3600_dual_boot_upgrade_failed \
+			"unsafe slot state: env=$env_slot boot=$boot_slot upgrade=$upgrade_slot"
+		;;
+	esac
+
+	# Prevent the bootloader from selecting a partially written slot after a
+	# power loss. The active slot is not changed until all writes have finished.
+	fw_setenv "dual_boot.slot_${upgrade_slot}_invalid" 1 ||
+		tr3600_dual_boot_upgrade_failed "cannot mark slot $upgrade_slot invalid"
+	sync
+
+	nand_do_flash_file "$image" ||
+		tr3600_dual_boot_upgrade_failed "failed writing slot $upgrade_slot"
+
+	# rootfs_data is shared by both slots and is recreated by nand_do_flash_file.
+	nand_do_restore_config ||
+		tr3600_dual_boot_upgrade_failed "failed restoring configuration"
+	sync
+
+	# Commit both variables in a single environment update. If this fails, the
+	# old slot remains active and the newly written slot remains invalid.
+	if ! fw_setenv -s - <<-EOF
+		dual_boot.slot_${upgrade_slot}_invalid 0
+		dual_boot.current_slot ${upgrade_slot}
+	EOF
+	then
+		tr3600_dual_boot_upgrade_failed "failed activating slot $upgrade_slot"
+	fi
+
+	sync
+	echo "sysupgrade successful, next boot uses slot $upgrade_slot"
+	umount -a
+	reboot -f
+}
+
 platform_do_upgrade() {
 	local board=$(board_name)
 
@@ -353,6 +441,9 @@ platform_do_upgrade() {
 		fw_setenv dual_boot.slot_0_invalid 0
 		fw_setenv dual_boot.slot_1_invalid 0
 		nand_do_upgrade_success
+		;;
+	cudy,tr3600-v1)
+		tr3600_dual_boot_upgrade "$1"
 		;;
 	netgear,eax17)
 		mtk_dual_boot_flash_both_slots "$1"

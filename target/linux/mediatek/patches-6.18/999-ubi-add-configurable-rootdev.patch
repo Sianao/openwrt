@@ -1,0 +1,42 @@
+From: Cudy <support@cudy.com>
+Subject: [PATCH] ubi: allow selecting the default rootfs volume
+
+Allow bootloaders to select an alternative UBI root filesystem volume using
+the ubi.rootfs_volume= parameter. This is used by devices which keep both
+rootfs and rootfs2 volumes in the same UBI partition.
+
+Signed-off-by: Cudy <support@cudy.com>
+---
+ drivers/mtd/ubi/block.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+--- a/drivers/mtd/ubi/block.c
++++ b/drivers/mtd/ubi/block.c
+@@ -93,6 +93,9 @@ static DEFINE_IDR(ubiblock_minor_idr);
+ static DEFINE_MUTEX(devices_mutex);
+ static int ubiblock_major;
+ 
++static char rootfs_volume[256] = "rootfs";
++module_param_string(rootfs_volume, rootfs_volume, sizeof(rootfs_volume), 0444);
++
+ static int __init ubiblock_set_param(const char *val,
+ 				     const struct kernel_param *kp)
+ {
+@@ -433,7 +436,7 @@ int ubiblock_create(struct ubi_volume_in
+ 		 dev->ubi_num, dev->vol_id, vi->name);
+ 	mutex_unlock(&devices_mutex);
+ 
+-	if (!strcmp(vi->name, "rootfs") &&
++	if (!strcmp(vi->name, rootfs_volume) &&
+ 	    IS_ENABLED(CONFIG_MTD_ROOTFS_ROOT_DEV) &&
+ 	    ROOT_DEV == 0) {
+ 		pr_notice("ubiblock: device ubiblock%d_%d (%s) set to be root filesystem\n",
+@@ -602,7 +605,7 @@ static void ubiblock_create_auto_rootfs(
+ 	int ret, is_ubifs;
+ 	struct ubi_volume_desc *desc;
+ 
+-	if (strcmp(vi->name, "rootfs") &&
++	if (strcmp(vi->name, rootfs_volume) &&
+ 	    strcmp(vi->name, "fit"))
+ 		return;
+ 

@@ -2,7 +2,7 @@
 # Copyright (C) 2021 OpenWrt.org
 #
 
-[ -e /etc/config/ubootenv ] && exit 0
+[ -s /etc/config/ubootenv ] && exit 0
 
 touch /etc/config/ubootenv
 
@@ -138,6 +138,13 @@ iptime,ax3000m)
 comfast,cf-wa933|\
 comfast,cf-wa933-128m)
 	ubootenv_add_uci_config "/dev/mtd1" "0x0" "0x20000" "0x20000"
+	;;
+cudy,tr3600-v1)
+	. /lib/upgrade/nand.sh
+	envubi=$(nand_find_ubi ubi)
+	envvol=$(nand_find_volume "$envubi" u-boot-env)
+	[ -n "$envvol" ] && \
+		ubootenv_add_uci_config "/dev/$envvol" "0x0" "0x80000" "0x80000" "1"
 	;;
 dlink,aquila-pro-ai-e30-a1|\
 dlink,aquila-pro-ai-m30-a1|\
