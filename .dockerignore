@@ -1,0 +1,12 @@
+.git
+.github
+.vscode
+.DS_Store
+*.log
+/bin
+/build_dir
+/staging_dir
+/dl
+/feeds
+/tmp
+/logs
