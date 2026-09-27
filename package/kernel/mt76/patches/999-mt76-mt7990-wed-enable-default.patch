@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TR3600 port <local>
+Date: Sat, 27 Sep 2026 00:00:00 +0800
+Subject: [PATCH] mtk: mt76: mt7990/mt7996: enable WED by default
+
+MediaTek's current MT7987 + MT7990 SDK defaults mt7996 WED to enabled.
+Keep the module parameter so it can still be overridden at probe time,
+but do not require an explicit `wed_enable=1` in module options.
+
+Not validated on hardware yet.
+
+--- a/mt7996/mmio.c
++++ b/mt7996/mmio.c
+@@ -14,7 +14,7 @@
+ #include "../trace.h"
+ #include "../dma.h"
+ 
+-static bool wed_enable;
++static bool wed_enable = true;
+ module_param(wed_enable, bool, 0644);
+ 
+ #define INVALID_REG_ADDR	0xffffffff
