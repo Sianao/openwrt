@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TR3600 port <local>
+Date: Sun, 28 Sep 2026 00:00:00 +0800
+Subject: [PATCH] mtk: mt76: mt7996: add WED/RRO configuration for MT7990
+
+Backport MediaTek SDK patch 0048
+("mtk: mt76: mt7996: add configuration to suppot wed and rro for mt7990
+chipset", fcea34c9147e), which is a prerequisite for SDK patch 0049 and
+was missing from the local MT7987 WED hwpath backport.
+
+Problem
+-------
+mt7996_mmio_wed_init() only special-cased MT7996 when setting up the TX
+free done event ring:
+
+	if (is_mt7996(&dev->mt76)) {
+		... MT7996_RXQ_TXFREE0 ... MT_INT_RX_TXFREE_MAIN
+	} else {
+		... MT7996_RXQ_MCU_WA_MAIN ... MT_INT_RX_DONE_WA_MAIN
+	}
+
+MT7990 is not MT7996, so it fell into the generic branch and was given
+MT7996's txfree ring and interrupt bit. MT7990 has its own TX free done
+ring and interrupt (MT7990_RXQ_TXFREE0/1 and
+MT_INT_RX_TXFREE_BAND0/1_MT7990, both already defined in this tree and
+already used by the non-WED path in mt7996_dma.c).
+
+With the wrong txfree ring the host never sees TX completion, the WED TX
+ring is never reclaimed, and TX stalls once it has filled up. Observed
+on Cudy TR3600 v1 (MT7987 + MT7990) together with the empty token range
+as "Tx attempts 0, PER 100%, SSID not beaconing" once wed_enable is on.
+
+Additionally, mt7996_dma_init() only enabled the MT_RXQ_RRO_BAND1 WED
+datapath for MT7992; MT7990 needs it too.
+
+Not validated on hardware yet.
+
+--- a/mt7996/dma.c
++++ b/mt7996/dma.c
+@@ -872,7 +872,7 @@ int mt7996_dma_init(struct mt7996_dev *dev)
+ 		if (ret)
+ 			return ret;
+ 
+-		if (is_mt7992(&dev->mt76)) {
++		if (!is_mt7996(&dev->mt76)) {
+ 			dev->mt76.q_rx[MT_RXQ_RRO_BAND1].flags =
+ 				MT_WED_RRO_Q_DATA(1) | MT_QFLAG_WED_RRO_EN;
+ 			if (mtk_wed_device_active(wed) &&
+--- a/mt7996/mmio.c
++++ b/mt7996/mmio.c
+@@ -519,11 +519,16 @@ int mt7996_mmio_wed_init(struct mt7996_dev *dev, void *pdev_ptr,
+ 			wed->wlan.wpdma_txfree = wed->wlan.phy_base + hif1_ofs +
+ 						 MT_RXQ_RING_BASE(0) +
+ 						 MT7996_RXQ_TXFREE2 * MT_RING_SIZE;
+-		} else {
++		} else if (is_mt7992(&dev->mt76)) {
+ 			wed->wlan.txfree_tbit = ffs(MT_INT_RX_TXFREE_BAND1_EXT) - 1;
+ 			wed->wlan.wpdma_txfree = wed->wlan.phy_base + hif1_ofs +
+ 						 MT_RXQ_RING_BASE(0) +
+ 						 MT7996_RXQ_MCU_WA_EXT * MT_RING_SIZE;
++		} else {
++			wed->wlan.txfree_tbit = ffs(MT_INT_RX_TXFREE_BAND1_MT7990) - 1;
++			wed->wlan.wpdma_txfree = wed->wlan.phy_base + hif1_ofs +
++						 MT_RXQ_RING_BASE(0) +
++						 MT7990_RXQ_TXFREE1 * MT_RING_SIZE;
+ 		}
+ 
+ 		wed->wlan.wpdma_rx_glo = wed->wlan.phy_base + hif1_ofs + MT_WFDMA0_GLO_CFG;
+@@ -589,13 +594,19 @@ int mt7996_mmio_wed_init(struct mt7996_dev *dev, void *pdev_ptr,
+ 		if (is_mt7996(&dev->mt76)) {
+ 			wed->wlan.wpdma_txfree = wed->wlan.phy_base +
+ 						 MT_RXQ_RING_BASE(0) +
+ 						 MT7996_RXQ_TXFREE0 * MT_RING_SIZE;
+ 			wed->wlan.txfree_tbit = ffs(MT_INT_RX_TXFREE_MAIN) - 1;
+-		} else {
++		} else if (is_mt7992(&dev->mt76)) {
+ 			wed->wlan.txfree_tbit = ffs(MT_INT_RX_DONE_WA_MAIN) - 1;
+ 			wed->wlan.wpdma_txfree = wed->wlan.phy_base + MT_RXQ_RING_BASE(0) +
+ 						  MT7996_RXQ_MCU_WA_MAIN * MT_RING_SIZE;
++		} else {
++			wed->wlan.txfree_tbit = ffs(MT_INT_RX_TXFREE_BAND0_MT7990) - 1;
++			wed->wlan.wpdma_txfree = wed->wlan.phy_base + MT_RXQ_RING_BASE(0) +
++						 MT7990_RXQ_TXFREE0 * MT_RING_SIZE;
++			if (dev->hif2)
++				wed->wlan.id = MT7990_DEVICE_ID;
+ 		}
+ 
+ 		if (dev->hif2 && is_mt7992(&dev->mt76))
+ 			wed->wlan.id = 0x7992;

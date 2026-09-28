@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TR3600 port <local>
+Date: Sun, 28 Sep 2026 00:00:00 +0800
+Subject: [PATCH] mtk: mt76: mt7990: give the host a WED TX token pool again
+
+Ported from MediaTek SDK mtk-openwrt-feeds
+0054-mtk-mt76-add-debug-tools.patch (the WED token layout changes).
+
+The MT7987 (WED v3.1) TX buffer manager is programmed with the TKID
+window [wed->wlan.token_start, +nbuf) = [0, 16384), and the SDK moves
+the host/software token pool above it:
+
+	dev->mt76.token_start = wed->wlan.nbuf;		/* 16384 */
+	.token_size           = MT7996_SW_TOKEN_SIZE;	/* 15360 */
+
+so that mt76_token_consume()'s
+
+	idr_alloc(&dev->token, *ptxwi, dev->token_start,
+		  dev->token_start + dev->token_size, GFP_ATOMIC);
+
+covers [16384, 31744) instead of colliding with the hardware window.
+
+mt76_wed_offload_enable() must therefore stop deriving the host pool
+size from wed->wlan.token_start.  For this configuration token_start is
+0, so the previous
+
+	dev->token_size = wed->wlan.token_start;
+
+collapses the idr range to [0, 0), which can never satisfy an
+allocation.  mt76_token_consume() then returns -ENOSPC for every frame,
+mt7996_tx_prepare_skb() bails out before writing the TXD, and because
+dev->token_count (0) >= dev->token_size (0) - MT76_TOKEN_FREE_THR the
+same call also marks every main TX queue permanently blocked.
+
+The callback only runs once a flow is hardware-offloaded
+(firewall flow_offloading_hw=1 -> mtk_flow_offload_replace() ->
+mtk_wed_flow_add() -> offload_enable).  That is why Wi-Fi works right
+after boot and dies as soon as the first offloaded flow appears:
+firmware-generated beacons keep the SSID visible, while every host TX
+frame - including hostapd's authentication responses - is dropped, so
+clients log "did not acknowledge authentication response" and can never
+associate.  With wed_enable=0 the callback is never installed and the
+bug stays hidden.
+
+Signed-off-by: TR3600 port <local>
+---
+diff -ruN a/mt7996/mmio.c b/mt7996/mmio.c
+--- a/mt7996/mmio.c	2026-09-28 02:25:30
++++ b/mt7996/mmio.c	2026-09-28 02:25:55
+@@ -678,6 +678,9 @@
+ 	if (!hif2)
+ 		dev->mt76.rx_token_size = tx_token_size + rx_token_size;
+ 
++	/* Host SW tokens live above the WED TX buffer TKID window. */
++	dev->mt76.token_start = wed->wlan.nbuf;
++
+ 	*irq = wed->irq;
+ 	dev->mt76.dma_dev = wed->dev;
+ 
+@@ -890,7 +893,7 @@
+ 		.survey_flags = SURVEY_INFO_TIME_TX |
+ 				SURVEY_INFO_TIME_RX |
+ 				SURVEY_INFO_TIME_BSS_RX,
+-		.token_size = MT7996_TOKEN_SIZE,
++		.token_size = MT7996_SW_TOKEN_SIZE,
+ 		.tx_prepare_skb = mt7996_tx_prepare_skb,
+ 		.tx_complete_skb = mt76_connac_tx_complete_skb,
+ 		.rx_skb = mt7996_queue_rx_skb,
+diff -ruN a/mt7996/mt7996.h b/mt7996/mt7996.h
+--- a/mt7996/mt7996.h	2026-09-28 02:25:30
++++ b/mt7996/mt7996.h	2026-09-28 02:25:55
+@@ -92,6 +92,7 @@
+ #define MT7996_EEPROM_SIZE		7680
+ #define MT7996_EEPROM_BLOCK_SIZE	16
+ #define MT7996_EXT_EEPROM_BLOCK_SIZE	1024
++#define MT7996_SW_TOKEN_SIZE		15360
+ #define MT7996_TOKEN_SIZE		16384
+ #define MT7996_HW_TOKEN_SIZE		8192
+ #define MT7996_WED_TOKEN_SIZE		16384
+diff -ruN a/wed.c b/wed.c
+--- a/wed.c	2026-09-28 02:25:30
++++ b/wed.c	2026-09-28 02:25:55
+@@ -88,7 +88,7 @@
+ 	struct mt76_dev *dev = mt76_wed_to_dev(wed);
+ 
+ 	spin_lock_bh(&dev->token_lock);
+-	dev->token_size = wed->wlan.token_start;
++	dev->token_size = dev->drv->token_size;
+ 	spin_unlock_bh(&dev->token_lock);
+ 
+ 	return !wait_event_timeout(dev->tx_wait, !dev->wed_token_count, HZ);

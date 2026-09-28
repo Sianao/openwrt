@@ -1,0 +1,163 @@
+diff -ruN src_base/mt76.h src_adapted/mt76.h
+--- a/mt76.h	2026-09-28 02:00:55
++++ b/mt76.h	2026-09-28 02:00:55
+@@ -875,6 +875,7 @@
+ 	spinlock_t tx_lock;
+ 	struct list_head tx_list;
+ 	struct mt76_queue *q_tx[__MT_TXQ_MAX];
++	int tokens;
+ 
+ 	atomic_t mgmt_tx_pending;
+ 
+@@ -984,6 +985,7 @@
+ 	u16 token_count;
+ 	u16 token_start;
+ 	u16 token_size;
++	u16 token_threshold;
+ 
+ 	spinlock_t rx_token_lock;
+ 	struct idr rx_token;
+@@ -2066,7 +2068,8 @@
+ 
+ struct mt76_txwi_cache *
+ mt76_token_release(struct mt76_dev *dev, int token, bool *wake);
+-int mt76_token_consume(struct mt76_dev *dev, struct mt76_txwi_cache **ptxwi);
++int mt76_token_consume(struct mt76_dev *dev, struct mt76_txwi_cache **ptxwi,
++		       u8 phy_idx);
+ void __mt76_set_tx_blocked(struct mt76_dev *dev, bool blocked);
+ struct mt76_txwi_cache *mt76_rx_token_release(struct mt76_dev *dev, int token);
+ int mt76_rx_token_consume(struct mt76_dev *dev, void *ptr,
+diff -ruN src_base/mt7915/mac.c src_adapted/mt7915/mac.c
+--- a/mt7915/mac.c	2026-09-01 19:25:05
++++ b/mt7915/mac.c	2026-09-28 02:00:55
+@@ -761,7 +761,7 @@
+ 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
+ 	t->skb = tx_info->skb;
+ 
+-	id = mt76_token_consume(mdev, &t);
++	id = mt76_token_consume(mdev, &t, wcid->phy_idx);
+ 	if (id < 0)
+ 		return id;
+ 
+diff -ruN src_base/mt7921/pci_mac.c src_adapted/mt7921/pci_mac.c
+--- a/mt7921/pci_mac.c	2026-09-01 19:25:05
++++ b/mt7921/pci_mac.c	2026-09-28 02:00:55
+@@ -27,7 +27,7 @@
+ 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
+ 	t->skb = tx_info->skb;
+ 
+-	id = mt76_token_consume(mdev, &t);
++	id = mt76_token_consume(mdev, &t, wcid->phy_idx);
+ 	if (id < 0)
+ 		return id;
+ 
+diff -ruN src_base/mt7925/pci_mac.c src_adapted/mt7925/pci_mac.c
+--- a/mt7925/pci_mac.c	2026-09-01 19:25:05
++++ b/mt7925/pci_mac.c	2026-09-28 02:00:55
+@@ -28,7 +28,7 @@
+ 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
+ 	t->skb = tx_info->skb;
+ 
+-	id = mt76_token_consume(mdev, &t);
++	id = mt76_token_consume(mdev, &t, wcid->phy_idx);
+ 	if (id < 0)
+ 		return id;
+ 
+diff -ruN src_base/mt7996/init.c src_adapted/mt7996/init.c
+--- a/mt7996/init.c	2026-09-28 02:00:55
++++ b/mt7996/init.c	2026-09-28 02:00:55
+@@ -1808,6 +1808,8 @@
+ 
+ 	ieee80211_queue_work(mt76_hw(dev), &dev->init_work);
+ 
++	dev->mt76.token_threshold = MT7996_PER_BAND_TOKEN_SIZE;
++
+ 	dev->recovery.hw_init_done = true;
+ 
+ 	ret = mt7996_init_debugfs(dev);
+diff -ruN src_base/mt7996/mac.c src_adapted/mt7996/mac.c
+--- a/mt7996/mac.c	2026-09-28 02:00:55
++++ b/mt7996/mac.c	2026-09-28 02:00:55
+@@ -1089,7 +1089,7 @@
+ 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
+ 	t->skb = tx_info->skb;
+ 
+-	id = mt76_token_consume(mdev, &t);
++	id = mt76_token_consume(mdev, &t, wcid->phy_idx);
+ 	if (id < 0)
+ 		return id;
+ 
+@@ -2276,8 +2276,11 @@
+ 
+ 	spin_lock_bh(&dev->mt76.token_lock);
+ 	idr_for_each_entry(&dev->mt76.token, txwi, id) {
++		struct mt76_phy *phy = mt76_dev_phy(&dev->mt76, txwi->phy_idx);
++
+ 		mt7996_txwi_free(dev, txwi, NULL, NULL, NULL);
+ 		dev->mt76.token_count--;
++		phy->tokens--;
+ 	}
+ 	spin_unlock_bh(&dev->mt76.token_lock);
+ 	idr_destroy(&dev->mt76.token);
+diff -ruN src_base/mt7996/mt7996.h src_adapted/mt7996/mt7996.h
+--- a/mt7996/mt7996.h	2026-09-28 02:00:55
++++ b/mt7996/mt7996.h	2026-09-28 02:00:55
+@@ -95,6 +95,7 @@
+ #define MT7996_TOKEN_SIZE		16384
+ #define MT7996_HW_TOKEN_SIZE		8192
+ #define MT7996_WED_TOKEN_SIZE		16384
++#define MT7996_PER_BAND_TOKEN_SIZE	4000
+ 
+ #define MT7996_CFEND_RATE_DEFAULT	0x49	/* OFDM 24M */
+ #define MT7996_CFEND_RATE_11B		0x03	/* 11B LP, 11M */
+diff -ruN src_base/tx.c src_adapted/tx.c
+--- a/tx.c	2026-09-01 19:25:05
++++ b/tx.c	2026-09-28 02:00:55
+@@ -944,18 +944,26 @@
+ }
+ EXPORT_SYMBOL_GPL(__mt76_set_tx_blocked);
+ 
+-int mt76_token_consume(struct mt76_dev *dev, struct mt76_txwi_cache **ptxwi)
++int mt76_token_consume(struct mt76_dev *dev, struct mt76_txwi_cache **ptxwi,
++		       u8 phy_idx)
+ {
+-	int token;
++	struct mt76_phy *phy = mt76_dev_phy(dev, phy_idx);
++	int token = -EBUSY;
+ 
+ 	spin_lock_bh(&dev->token_lock);
+ 
++	if (phy->tokens >= dev->token_threshold)
++		goto out;
++
+ 	token = idr_alloc(&dev->token, *ptxwi, dev->token_start,
+ 			  dev->token_start + dev->token_size,
+ 			  GFP_ATOMIC);
+ 	if (token >= dev->token_start) {
+ 		dev->token_count++;
+ 
++		(*ptxwi)->phy_idx = phy_idx;
++		phy->tokens++;
++
+ 		if ((*ptxwi)->qid == MT_TXQ_PSD) {
+ 			struct mt76_phy *mphy = mt76_dev_phy(dev, (*ptxwi)->phy_idx);
+ 			atomic_inc(&mphy->mgmt_tx_pending);
+@@ -971,6 +979,7 @@
+ 	if (dev->token_count >= dev->token_size - MT76_TOKEN_FREE_THR)
+ 		__mt76_set_tx_blocked(dev, true);
+ 
++out:
+ 	spin_unlock_bh(&dev->token_lock);
+ 
+ 	return token;
+@@ -1004,7 +1013,10 @@
+ 
+ 	txwi = idr_remove(&dev->token, token);
+ 	if (txwi) {
++		struct mt76_phy *phy = mt76_dev_phy(dev, txwi->phy_idx);
++
+ 		dev->token_count--;
++		phy->tokens--;
+ 
+ 		if (txwi->qid == MT_TXQ_PSD) {
+ 			struct mt76_phy *mphy = mt76_dev_phy(dev, txwi->phy_idx);

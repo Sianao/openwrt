@@ -380,8 +380,9 @@ index 8b4815e..85b678b 100644
  	}
  
 -	wed->wlan.nbuf = MT7996_HW_TOKEN_SIZE;
+-	wed->wlan.token_start = MT7996_TOKEN_SIZE - wed->wlan.nbuf;
 +	wed->wlan.nbuf = tx_token_size;
- 	wed->wlan.token_start = MT7996_TOKEN_SIZE - wed->wlan.nbuf;
++	wed->wlan.token_start = 0;
  	wed->wlan.hif2 = hif2;
  
 @@ -621,12 +675,8 @@ int mt7996_mmio_wed_init(struct mt7996_dev *dev, void *pdev_ptr,
